@@ -627,8 +627,9 @@ int main(int argc, char **argv)
       if (node_speed<0.0f)    // Speed test not performed before (first projection being simulated): set num_blocks_speed_test and histories_speed_test.
       {
         num_blocks_speed_test = guestimate_GPU_performance(gpu_id);  // Guestimating a good number of blocks to estimate the speed of different generations of GPUs. Slower GPUs will simulate less particles and hopefully the fastest GPUs will not have to wait much.
-        histories_speed_test = (unsigned long long int)(num_blocks_speed_test*num_threads_per_block)*(unsigned long long int)(histories_per_thread);
       }
+
+      histories_speed_test = (unsigned long long int)(num_blocks_speed_test*num_threads_per_block)*(unsigned long long int)(histories_per_thread);  // !!DeBuG!! BUG CORRECTED: histories_per_thread may change below (2011-11-04)
 
       // Re-load the input total number of histories and the random seed for the projection:
       total_histories = total_histories_INPUT;
