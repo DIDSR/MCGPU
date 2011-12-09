@@ -1,4 +1,3 @@
-
 ////////////////////////////////////////////////////////////////////////////////////////
 //
 //               ****************************
@@ -6,7 +5,7 @@
 //               ****************************
 //
 /**
- *      \mainpage MC-GPU v1.2
+ *      \mainpage MC-GPU v1.2 (with some bug fixed, 2011-12-06)
  * 
  * \code   
  *                         Andreu Badal (Andreu.Badal-Soler@fda.hhs.gov)
@@ -605,9 +604,7 @@ int main(int argc, char **argv)
       
     // *** Simulate in the GPUs the input amount of time or amount of particles:
     
-    // -- Estimate GPU speed to use a total simulation time or multiple GPUs:
-
-    
+    // -- Estimate GPU speed to use a total simulation time or multiple GPUs:    
     
     if ( simulating_by_time==0 &&   // Simulating a fixed number of particles, not a fixed time (so performing the speed test only once)
          node_speed>0.0f &&         // Speed test already performed for a previous projection in this simulation (node_speed and total_speed variables set)
@@ -627,24 +624,29 @@ int main(int argc, char **argv)
       if (node_speed<0.0f)    // Speed test not performed before (first projection being simulated): set num_blocks_speed_test and histories_speed_test.
       {
         num_blocks_speed_test = guestimate_GPU_performance(gpu_id);  // Guestimating a good number of blocks to estimate the speed of different generations of GPUs. Slower GPUs will simulate less particles and hopefully the fastest GPUs will not have to wait much.
+        
+//!!DeBuG!! ERROR code version 1.2:   histories_speed_test = (unsigned long long int)(num_blocks_speed_test*num_threads_per_block)*(unsigned long long int)(histories_per_thread);
+        
       }
+      
+      histories_speed_test = (unsigned long long int)(num_blocks_speed_test*num_threads_per_block)*(unsigned long long int)(histories_per_thread);  //!!DeBuG!! BUG CORRECTED: histories_per_thread may change below (2011-11-04)
 
-      histories_speed_test = (unsigned long long int)(num_blocks_speed_test*num_threads_per_block)*(unsigned long long int)(histories_per_thread);  // !!DeBuG!! BUG CORRECTED: histories_per_thread may change below (2011-11-04)
 
-      // Re-load the input total number of histories and the random seed for the projection:
+      // Re-load the input total number of histories and the random seed:
       total_histories = total_histories_INPUT;
       seed_input = seed_input_INPUT;                
-            
       
       dim3  blocks_speed_test(num_blocks_speed_test, 1);
       dim3 threads_speed_test(num_threads_per_block, 1);
 
       
       // -- Init the current random number generator seed to avoid overlapping sequences with other MPI threads:      
-      if (simulating_by_time == 1) // Simulating by time: set an arbitrary huge number of particles to skip.
-        update_seed_PRNG(myID, (unsigned long long int)(123456789012), &seed_input);
-      else  // Simulating by histories
-        update_seed_PRNG(myID, total_histories, &seed_input);
+      if (simulating_by_time == 1) 
+        // Simulating by time: set an arbitrary huge number of particles to skip.
+        update_seed_PRNG( (myID + num_p*numprocs), (unsigned long long int)(123456789012), &seed_input);     // Set the random number seed far from any other MPI thread (myID) and away from the seeds used in the previous projections (num_p*numprocs).
+      else  
+        // Simulating by histories
+        update_seed_PRNG( (myID + num_p*numprocs), total_histories, &seed_input);   //!!DeBuG!! Do not repeat seed for each projection!! Is there a problem if we go over the PRNG cycle??
             
       
       #ifdef USING_MPI
@@ -725,7 +727,9 @@ int main(int argc, char **argv)
           total_histories = numprocs;       // Enough particles simulated already, simulate just one more history (block) and report (kernel call would fail if total_histories < or == 0).
       }     
      
-    }   // [Done with case of simulating projections by time or first projection by number of particles]
+    }   // [Done with case of simulating projections by time or first projection by number of particles]    
+    
+    // else  ==>  if using only 1 GPU and a fixed number of histories the whole speed test is skipped. The random seed will be different for each projection because it is updated after calling the kernel below.
   
   
     // fflush(stdout); 
@@ -770,16 +774,21 @@ int main(int argc, char **argv)
 
     dim3 blocks(total_threads_blocks, 1);
     dim3 threads(num_threads_per_block, 1); 
-
-    // -- Execute the kernel with timings:
-    cutilCheckError(cutResetTimer(timer)); 
-    cutilCheckError(cutStartTimer(timer));
     
+    cutilCheckError(cutResetTimer(timer));
+    cutilCheckError(cutStartTimer(timer));   // Start GPU timers
+    
+    // *** Execute the x-ray transport kernel in the GPU ***
     track_particles<<<blocks,threads>>>(histories_per_thread, num_p, seed_input, image_device, dose_device, voxel_mat_dens_device, mfp_Woodcock_table_device, mfp_table_a_device, mfp_table_b_device, rayleigh_table_device, compton_table_device);
+    
     
     if (1==doing_speed_test)
       total_histories += histories_speed_test;     // Speed test was done: compute the total number of histories including the particles simulated in the speed test 
-
+      
+    // -- Move the pseudo-random number generator seed ahead to skip all the random numbers generated in the current projection by this and the other
+    //    "numprocs" MPI threads. Each projection will use independent seeds! (this code runs in parallel with the asynchronous GPU kernel):
+    update_seed_PRNG(numprocs, total_histories, &seed_input);   //!!DeBuG!! Do not repeat seed for each projection. Note that this function only updates 1 seed, the only is not accurately computed.    ??Is there a problem if we go over the PRNG cycle??
+              
 
     #ifdef USING_MPI 
       if (numprocs>1)  // Using more than 1 MPI thread:
@@ -959,14 +968,17 @@ int main(int argc, char **argv)
         cudaThreadSynchronize();
         cutilCheckMsg("\n\n !!Kernel execution failed initializing the image array!! ");  // Check if kernel execution generated any error:
       #else
-        int j;
-        for (j=0; j<pixels_per_image; j++)   // INIT IMAGE ARRAY IN THE CPU
-        {
+                
+        // memset(image, 0, sizeof(image));     //!!DeBuG!! Init memory space to 0. This should work better than the loop...
+       int j;
+       for (j=0; j<pixels_per_image; j++)   // INIT IMAGE ARRAY IN THE CPU
+       {
           image[j                   ] = (unsigned long long int)(0);
           image[j+  pixels_per_image] = (unsigned long long int)(0);
           image[j+2*pixels_per_image] = (unsigned long long int)(0);
           image[j+3*pixels_per_image] = (unsigned long long int)(0);
         }
+
       #endif
     }
     
@@ -1267,8 +1279,8 @@ void read_input(int argc, char** argv, int myID, unsigned long long int* total_h
     theta_aperture = +1.00e-7;
   }
   if (abs(phi_aperture) < 1.0e-7)
-  {
-    theta_aperture = +1.00e-7;
+  {  
+    phi_aperture = +1.00e-7;   //!!DeBuG!! BUG in code version 1.2 corrected (old: theta_aperture = +1.00e-7;)
   }
 
   
@@ -1647,6 +1659,8 @@ void read_input(int argc, char** argv, int myID, unsigned long long int* total_h
 
 #ifndef USING_CUDA
   // *** Initialize the images to 0 in the CPU. The CUDA code will init it to 0 in the GPU global memory later, using kernel "init_image_array_GPU".
+                
+  // memset(*image_ptr, 0, sizeof(*image_ptr));     //!!DeBuG!! Init memory space to 0.
   register int j;
   for (j=0; j<pixels_per_image; j++)
   {
@@ -1685,12 +1699,16 @@ void read_input(int argc, char** argv, int myID, unsigned long long int* total_h
   
   if ((*dose_ROI_x_max)>-1)
   {    
+        
+    // memset(*dose_ptr, 0, sizeof(*dose_ptr));     //!!DeBuG!! Init memory space to 0.
     register int jj;
     for (jj=0; jj<num_voxels_ROI; jj++)
     {
       (*dose_ptr)[jj].x = (unsigned long long int)(0);
       (*dose_ptr)[jj].y = (unsigned long long int)(0);
     }
+
+
   }
 // #endif
 
@@ -2311,8 +2329,7 @@ void init_CUDA_device( int* gpu_id, int myID, int numprocs,
     }
     else
     {
-      printf("           -- Time spent communicating between threads to determine the GPU id to use in each thread: %.6f s\n", ((double)(clock()-clock_start))/CLOCKS_PER_SEC);
-      fflush(stdout);
+      printf("           -- Time spent communicating between threads to determine the GPU id to use in each thread: %.6f s\n", ((double)(clock()-clock_start))/CLOCKS_PER_SEC); fflush(stdout);
     }
     
   }
@@ -2321,22 +2338,19 @@ void init_CUDA_device( int* gpu_id, int myID, int numprocs,
   
   if (*gpu_id>=deviceCount)
   {
-    printf("\n\n\n  !!ERROR!! The selected GPU number is too high, this device number does not exist!! GPU_id (starting at 0)=%d, deviceCount=%d\n\n\n", (*gpu_id), deviceCount);
+    printf("\n\n\n  !!ERROR!! The selected GPU number is too high, this device number does not exist!! GPU_id (starting at 0)=%d, deviceCount=%d\n\n\n", (*gpu_id), deviceCount); fflush(stdout);
     if (numprocs==1)
     {
       *gpu_id = cutGetMaxGflopsDeviceId();
-      printf("            Selecting the fastest GPU available using cutGetMaxGflopsDeviceId(): GPU_id = %d\n\n", (*gpu_id));
-      fflush(stdout);      
-    }
+      printf("            Selecting the fastest GPU available using cutGetMaxGflopsDeviceId(): GPU_id = %d\n\n", (*gpu_id)); fflush(stdout);
+    }    
     else
     {
       exit(-1);    
     }
-  }
-     
+  }     
 
-  cutilSafeCall(cudaSetDevice(*gpu_id));   // Set the GPU device. (optionally use: cutGetMaxGflopsDeviceId())
-  
+  cutilSafeCall(cudaSetDevice(*gpu_id));   // Set the GPU device. (optionally use: cutGetMaxGflopsDeviceId())  
    
   
   cudaDeviceProp deviceProp;
@@ -2502,20 +2516,27 @@ void init_CUDA_device( int* gpu_id, int myID, int numprocs,
 ////////////////////////////////////////////////////////////////////////////////
 //! Guestimate a good number of blocks to estimate the speed of different generations 
 //! of GPUs. Slower GPUs will simulate less particles and hopefully the fastest GPUs 
-//! will not have to wait much.  
-//! Currently the "optimum" number of blocks is arbitrarily computed as the product  
-//! of the number of GPU cores * core frequency * major compute capability * 2 + 100.
-//! The constant 100 blocks are added to try to get enough blocks for a reliable timing 
-//! of slow GPUs.
+//! will not have to wait much. If the speed is not accurately estimated in the speed test
+//! some GPUs will simulate longer than others and valuable simulation time will be wasted 
+//! in the idle GPUs.
+//!
+//! In this function the "optimum" number of blocks for the speed test is heuristically 
+//! computed as the product of three GPU characteristics:
+//!   [2.0] * [number of GPU cores] * [core frequency] * [major CUDA compute capability] + [100]
+//!
+//! The factor 2.0 is arbitrary and can be modified depending on the case (for short 
+//! simulations this value may have to be reduced or the speed test will take longer 
+//! than the whole simulation). The constant 100 blocks are added to try to get enough 
+//! blocks for a reliable timing of slow GPUs.
 //!
 //! For example, an NVIDIA GeForce 290 will get:
-//!   240 (cores) * 1.24 (GHz) * 1 (major compute capability) =  297.60 ~  298 blocks
+//!   2.0 * 240 (cores) * 1.24 (GHz) * 1 (major compute capability) + 100 =  695.2 ~  695 blocks
 //! An NVIDIA GeForce 580 will get:
-//!   512 (cores) * 1.66 (GHz) * 2 (major compute capability) = 1699.84 ~ 1700 blocks 
+//!   2.0 * 512 (cores) * 1.54 (GHz) * 2 (major compute capability) + 100 = 3253.9 ~ 3254 blocks 
 //! In total the 580 gets 5.7 times more blocks than the 290.
 //!
 //!       @param[in] gpu_id   GPU number
-//!       @param[out] num_blocks   Returns a number of blocks related to the GPU speed
+//!       @param[out] num_blocks   Returns a number of blocks related to the expected GPU speed
 ////////////////////////////////////////////////////////////////////////////////
 int guestimate_GPU_performance(int gpu_id)
 {          
@@ -3064,7 +3085,14 @@ void set_CT_trajectory(int myID, int num_projections, double D_angle, double ang
 ////////////////////////////////////////////////////////////////////////////////
 //! Initialize the first seed of the pseudo-random number generator (PRNG) 
 //! RANECU to a position far away from the previous history (leap frog technique).
-//! See function "init_PRNG" for more info.
+//! This function is equivalent to "init_PRNG" but only updates one of the seeds.
+//!
+//! Note that if we use the same seed number to initialize the 2 MLCGs of the PRNG
+//! we can only warranty that the first MLCG will be uncorrelated for each value
+//! generated by "update_seed_PRNG". There is a tiny chance that the final PRNs will
+//! be correlated because the leap frog on the first MLCG will probably go over the
+//! repetition cycle of the MLCG, which is much smaller than the full RANECU. But any
+//! correlataion is extremely unlikely. Function "init_PRNG" doesn't have this issue.
 //!
 //!       @param[in] batch_number   Elements to skip (eg, MPI thread_number).
 //!       @param[in] total_histories   Histories to skip.
