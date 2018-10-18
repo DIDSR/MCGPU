@@ -1,4 +1,8 @@
 
+//    --> MC-GPU v1.3 was originally released in Google Code in 2012.
+//        This page contains the original 2012 code, with only a bug in the function "report_voxels_dose" corrected.
+//        An upgraded version of MC-GPU is being developed.
+
 //   ** CHANGE LIST **  See below \section sec_changes_13 List of changes in code version 1.3
 
 // -- Code upgraded from CUDA 4 to CUDA 5, after cutil_inline.h has been eliminated from the SDK:
@@ -816,7 +820,7 @@ int main(int argc, char **argv)
   
     // -- Compute the number of CUDA blocks to simulate, rounding up and making sure it is below the limit of 65535 blocks.
     //    The total number of particles simulated will be increased to the nearest multiple "histories_per_thread".
-    int total_threads = (int)(((double)total_histories)/((double)histories_per_thread) + 0.9990);     // Divide the histories among GPU threads, rounding up
+    double total_threads = ceil(((double)total_histories)/((double)histories_per_thread));     // Divide the histories among GPU threads, rounding up and avoiding overflow     //  New in MC-GPU v1.4 (Mina's bug)
     int total_threads_blocks = (int)(((double)total_threads)/((double)num_threads_per_block) + 0.9990);   // Divide the GPU threads among CUDA blocks, rounding up
     if (total_threads_blocks>65535)
     {     
@@ -1791,10 +1795,8 @@ void read_input(int argc, char** argv, int myID, unsigned long long int* total_h
     MASTER_THREAD printf("       Array for 4 scatter images correctly allocated (%d pixels, %f Mbytes)\n", pixels_per_image, (*image_bytes)/(1024.f*1024.f));
   }
 
-#ifndef USING_CUDA
   // *** Initialize the images to 0 in the CPU. The CUDA code will init it to 0 in the GPU global memory later, using kernel "init_image_array_GPU".
   memset(*image_ptr, 0, (*image_bytes));     // Init memory space to 0.   
-#endif
 
 
   // *** Allocate dose and dose^2 array if tally active:
@@ -2395,8 +2397,9 @@ void init_CUDA_device( int* gpu_id, int myID, int numprocs,
         struct detector_struct** detector_data_device, struct source_struct** source_data_device,
         ulonglong2* voxels_Edep, ulonglong2** voxels_Edep_device, int voxels_Edep_bytes, short int* dose_ROI_x_min, short int* dose_ROI_x_max, short int* dose_ROI_y_min, short int* dose_ROI_y_max, short int* dose_ROI_z_min, short int* dose_ROI_z_max,
         ulonglong2* materials_dose, ulonglong2** materials_dose_device, int flag_material_dose, int num_projections)
-{
-  int deviceCount;
+{    
+  cudaDeviceProp deviceProp;
+  int deviceCount;  
   checkCudaErrors(cudaGetDeviceCount(&deviceCount));
   if (0==deviceCount)
   {
@@ -2405,14 +2408,12 @@ void init_CUDA_device( int* gpu_id, int myID, int numprocs,
   }  
   
   
-#ifdef USING_MPI
-
-  // *** Select the appropriate GPUs in the different workstations in the MPI hostfile:
-  //     The idea is that each threads will wait for the previous thread to send a messages with its processor name and GPU id, 
-  //     then it will assign the current GPU, and finally it will notify the following thread:
-      
+#ifdef USING_MPI      
   if (numprocs>1)
   {      
+    // *** Select the appropriate GPUs in the different workstations in the MPI hostfile:
+    //     The idea is that each threads will wait for the previous thread to send a messages with its processor name and GPU id, 
+    //     then it will assign the current GPU, and finally it will notify the following thread:    
     const int NODE_NAME_LENGTH = 31;
     char processor_name[NODE_NAME_LENGTH+1], previous_processor_name[NODE_NAME_LENGTH+1];
     int resultlen = -1;
@@ -2425,8 +2426,7 @@ void init_CUDA_device( int* gpu_id, int myID, int numprocs,
 
     clock_t clock_start;
     if (myID == (numprocs-1))
-      clock_start = clock();
-        
+      clock_start = clock();        
 
     // Unless we are the first thread, wait for a message from the previous thread:
     // The MPI_Recv command will block the execution of the code until the previous threads have communicated and shared the appropriate information.
@@ -2436,7 +2436,6 @@ void init_CUDA_device( int* gpu_id, int myID, int numprocs,
           // printf("\n -> MPI_Recv thread %d: gpu_id=%d, %s\n", myID, (int)previous_processor_name[NODE_NAME_LENGTH-1], previous_processor_name); fflush(stdout);  //!!Verbose!! 
     }
     
-
     // Compare the 30 first characters of the 2 names to see if we changed the node, except for the first thread that allways gets GPU 0:
     if ((0==myID) || (0!=strncmp(processor_name, previous_processor_name, NODE_NAME_LENGTH-1)))
     { 
@@ -2455,7 +2454,20 @@ void init_CUDA_device( int* gpu_id, int myID, int numprocs,
       printf("             Skipping GPU %d in thread %d (%s), as selected in the input file: gpu_id=%d\n", gpu_id_to_avoid, myID, processor_name, *gpu_id); fflush(stdout);
     }
     
-    
+  
+  
+    //!!DeBuG!! MC-GPU_v1.4!! Skip GPUs connected to a monitor, if more GPUs available:
+    checkCudaErrors(cudaGetDeviceProperties(&deviceProp, *gpu_id));    
+    if (0!=deviceProp.kernelExecTimeoutEnabled)                                 //!!DeBuG!! 
+    {
+      if((*gpu_id)<(deviceCount-1))                                             //!!DeBuG!! 
+      {      
+        printf("\n       ==> CUDA: GPU #%d is connected to a display and the CUDA driver would limit the kernel run time. Skipping this GPU!!\n", *gpu_id); //!!DeBuG!!
+        *gpu_id = (*gpu_id)+1;                                                  //!!DeBuG!!
+      }
+    }
+  
+       
     // Send the processor and GPU id to the following thread, unless we are the last thread:
     if (myID != (numprocs-1))
     { 
@@ -2467,12 +2479,11 @@ void init_CUDA_device( int* gpu_id, int myID, int numprocs,
     else
     {
       printf("           -- Time spent communicating between threads to determine the GPU id to use in each thread: %.6f s\n", ((double)(clock()-clock_start))/CLOCKS_PER_SEC); fflush(stdout);
-    }
-    
-  }
-  
+    }    
+  }  
 #endif  
-  
+
+
   if (*gpu_id>=deviceCount)
   {
     printf("\n\n  !!WARNING!! The selected GPU number is too high, this device number does not exist!! GPU_id (starting at 0)=%d, deviceCount=%d\n", (*gpu_id), deviceCount); fflush(stdout);
@@ -2487,17 +2498,15 @@ void init_CUDA_device( int* gpu_id, int myID, int numprocs,
     }
   }     
 
-  checkCudaErrors(cudaSetDevice(*gpu_id));   // Set the GPU device. (optionally use: cutGetMaxGflopsDeviceId())
-   
-  
-  cudaDeviceProp deviceProp;
-  checkCudaErrors(cudaGetDeviceProperties(&deviceProp, *gpu_id));
+  checkCudaErrors(cudaGetDeviceProperties(&deviceProp, *gpu_id));   // Re-load card properties in case we chaged gpu_id
   if (deviceProp.major>99 || deviceProp.minor>99)
   {
     printf("\n\n\n  !!ERROR!! The selected GPU device does not support CUDA!! GPU_id=%d, deviceCount=%d, compute capability=%d.%d\n\n\n", (*gpu_id), deviceCount, deviceProp.major,deviceProp.minor);
     exit(-1);
   }
-
+  
+  checkCudaErrors(cudaSetDevice(*gpu_id));   // Set the GPU device. (optionally use: cutGetMaxGflopsDeviceId())
+        
   if (deviceProp.major>1)
   {
     
@@ -2531,7 +2540,7 @@ void init_CUDA_device( int* gpu_id, int myID, int numprocs,
   int driverVersion = 0, runtimeVersion = 0;  
   cudaDriverGetVersion(&driverVersion);
   cudaRuntimeGetVersion(&runtimeVersion);
-  printf("                 CUDA Driver Version: %d.%d, Runtime Version: %d.%d\n", driverVersion/1000, driverVersion%100, runtimeVersion/1000, runtimeVersion%100);
+  printf("                 CUDA Driver Version: %d.%d, Runtime Version: %d.%d\n\n", driverVersion/1000, driverVersion%100, runtimeVersion/1000, runtimeVersion%100);
 
   if (0!=deviceProp.kernelExecTimeoutEnabled)
   {
@@ -2540,6 +2549,8 @@ void init_CUDA_device( int* gpu_id, int myID, int numprocs,
     // exit(-1);
   }    
 
+  fflush(stdout);
+  
   clock_t clock_init = clock();    
 
   // -- Allocate the constant variables in the device:
@@ -2904,7 +2915,7 @@ int report_voxels_dose(char* file_dose_output, int num_projections, struct voxel
   strncpy (file_binary_mean, file_dose_output, 250);
   strcat(file_binary_mean,".raw");                     
   strncpy (file_binary_sigma, file_dose_output, 250);
-  strcat(file_binary_sigma,"_2sigma.raw");    
+  strcat(file_binary_sigma,"_PercentRelError2sigma.raw");    
   FILE* file_binary_mean_ptr  = fopen(file_binary_mean, "w");  // !!BINARY!!
   FILE* file_binary_sigma_ptr = fopen(file_binary_sigma, "w");       // !!BINARY!!
   if (file_binary_mean_ptr==NULL)
@@ -2952,6 +2963,9 @@ int report_voxels_dose(char* file_dose_output, int num_projections, struct voxel
   fprintf(file_ptr, "#  Usually the doses will be acceptable for photon energies below 1 MeV. The dose estimates may not be accurate at the interface of low density volumes.\n");
   fprintf(file_ptr, "#\n");
   fprintf(file_ptr, "#  The 3D dose deposition is reported in binary form in the .raw files (data given as 32-bit floats). \n");
+  
+  fprintf(file_ptr, "#  The %% relative error in the voxel dose at 2 standard deviations [=100*2*sigma/voxel_dose] is reported in the *_PercentRelError2sigma.raw file (32-bit floats). \n");   //  !!SPIE2013!!   Report relative error 
+   
   fprintf(file_ptr, "#  To reduce the memory use and the reporting time this text output reports only the 2D dose at the Z plane at the level\n"); 
   fprintf(file_ptr, "#  of the source focal spot: z_coord = %d (z_coord in ROI = %d)\n", z_plane_dose, z_plane_dose_ROI);
   fprintf(file_ptr, "#\n");  
@@ -2972,9 +2986,8 @@ int report_voxels_dose(char* file_dose_output, int num_projections, struct voxel
   fprintf(file_ptr, "# =====================================\n");
   fflush(file_ptr);
   
-  double voxel_dose, max_voxel_dose = -1.0, max_voxel_dose_std_dev = -1.0;
-  
-  int max_dose_voxel_geometry=0, max_voxel_dose_x=-1, max_voxel_dose_y=-1, max_voxel_dose_z=-1;
+  double voxel_dose, max_voxel_dose[MAX_MATERIALS], max_voxel_dose_std_dev[MAX_MATERIALS], max_voxel_dose_all_mat=0.0, max_voxel_dose_std_dev_all_mat=0.0;
+  int max_voxel_dose_x[MAX_MATERIALS], max_voxel_dose_y[MAX_MATERIALS], max_voxel_dose_z[MAX_MATERIALS];
   unsigned long long int total_energy_deposited = 0;
   double inv_SCALE_eV = 1.0 / SCALE_eV,      // conversion to eV using the inverse of the constant used in the tally function (defined in the header file).         
                 inv_N = 1.0 / (double)(total_histories*((unsigned long long int)num_projections));
@@ -2989,6 +3002,11 @@ int report_voxels_dose(char* file_dose_output, int num_projections, struct voxel
      mat_Edep2[i] = 0.0;
      mat_mass_ROI[i]  = 0.0;
      mat_voxels[i]= 0;
+     max_voxel_dose[i]        =-1.0;
+     max_voxel_dose_std_dev[i]= 1.0e-15;
+     max_voxel_dose_x[i]      = 0;
+     max_voxel_dose_y[i]      = 0;
+     max_voxel_dose_z[i]      = 0;       
   }
   
   double voxel_volume = 1.0 / ( ((double)voxel_data->inv_voxel_size.x) * ((double)voxel_data->inv_voxel_size.y) * ((double)voxel_data->inv_voxel_size.z) );
@@ -3017,22 +3035,34 @@ int report_voxels_dose(char* file_dose_output, int num_projections, struct voxel
               //   }
                 
         // -- Convert total energy deposited to dose [eV/gram] per history:                        
-        voxel_dose = ((double)voxels_Edep[voxel].x) * inv_N * inv_voxel_mass * inv_SCALE_eV;    // [dose == Edep * voxel_volume / voxel_density / N_hist]                      
-        total_energy_deposited += voxels_Edep[voxel].x;
+        
+//  !!DeBuG!! BUG in first version MC-GPU v1.3, corrected for v1.4 [2013-01-31]. Edep2 is NOT scaled by SCALE_eV!! Also, division by voxel_mass must be done at the end!
+//  !!DeBuG!!   Wrong:  voxel_dose = ((double)voxels_Edep[voxel].x) * inv_N * inv_voxel_mass * inv_SCALE_eV;
+//  !!DeBuG!!   Wrong:  register double voxel_std_dev = (((double)voxels_Edep[voxel].y) * inv_N * inv_SCALE_eV * inv_voxel_mass - voxel_dose*voxel_dose) * inv_N;
 
-        register double voxel_std_dev = (((double)voxels_Edep[voxel].y) * inv_N * inv_SCALE_eV * inv_voxel_mass - voxel_dose*voxel_dose) * inv_N;   // [sigma = (<Edep^2> - <Edep>^2) / N_hist]
+        voxel_dose = ((double)voxels_Edep[voxel].x) * inv_N * inv_SCALE_eV;    // [<Edep> == Edep / N_hist /scaling_factor ;  dose == <Edep> / mass]
+        total_energy_deposited += voxels_Edep[voxel].x;
+               
+        register double voxel_std_dev = (((double)voxels_Edep[voxel].y) * inv_N - voxel_dose*voxel_dose) * inv_N * inv_voxel_mass;   // [sigma_Edep^2 = (<Edep^2> - <Edep>^2) / N_hist] ; [sigma_dose^2 = sigma_Edep/mass] (not using SCALE_eV for std_dev to prevent overflow)  
+
         if (voxel_std_dev>0.0)
           voxel_std_dev = sqrt(voxel_std_dev);
         
-        if (voxel_dose > max_voxel_dose)
+        voxel_dose *= inv_voxel_mass;    // [dose == <Edep> / mass]
+        
+        if (voxel_dose > max_voxel_dose[mat_number])    // Tally peak dose for each material!
         {
           // Find the voxel that has the maximum dose:
-          max_voxel_dose          = voxel_dose;
-          max_voxel_dose_std_dev  = voxel_std_dev;
-          max_voxel_dose_x        = i+dose_ROI_x_min;
-          max_voxel_dose_y        = j+dose_ROI_y_min;
-          max_voxel_dose_z        = k+dose_ROI_z_min;
-          max_dose_voxel_geometry = voxel_geometry;          
+          max_voxel_dose[mat_number]          = voxel_dose;
+          max_voxel_dose_std_dev[mat_number]  = voxel_std_dev;
+          max_voxel_dose_x[mat_number]        = i+dose_ROI_x_min;
+          max_voxel_dose_y[mat_number]        = j+dose_ROI_y_min;
+          max_voxel_dose_z[mat_number]        = k+dose_ROI_z_min;
+          if (voxel_dose > max_voxel_dose_all_mat)
+          {
+            max_voxel_dose_all_mat = voxel_dose;
+            max_voxel_dose_std_dev_all_mat = voxel_std_dev;
+          }
         }
         
         // Report only one dose plane in ASCII:
@@ -3040,10 +3070,16 @@ int report_voxels_dose(char* file_dose_output, int num_projections, struct voxel
           fprintf(file_ptr, "%.6lf %.6lf\n", voxel_dose, 2.0*voxel_std_dev);        
         
         float voxel_dose_float  = (float)voxel_dose;         // After dividing by the number of histories I can report FLOAT bc the number of significant digits will be low.  
-        float voxel_sigma_float = 2.0f * (float)(voxel_std_dev);
         
         fwrite(&voxel_dose_float,  sizeof(float), 1, file_binary_mean_ptr);    // Write dose data in a binary file that can be easyly open in imageJ.   !!BINARY!!
-        fwrite(&voxel_sigma_float, sizeof(float), 1, file_binary_sigma_ptr);
+
+       
+        // !!DeBuG!! OLD version, reporting sigma: float voxel_sigma_float = 2.0f * (float)(voxel_std_dev);  fwrite(&voxel_sigma_float, sizeof(float), 1, file_binary_sigma_ptr);
+        float voxel_relErr_float = 0.0f;
+        if (voxel_dose > 0.0)
+          voxel_relErr_float = 200.0f*(float)(voxel_std_dev/voxel_dose);        //  New in MC-GPU v1.4: Report relative error for 2*sigma, in %  (avoid dividing by 0)
+        fwrite(&voxel_relErr_float, sizeof(float), 1, file_binary_sigma_ptr);
+        
         
         voxel++;
       }
@@ -3067,15 +3103,19 @@ int report_voxels_dose(char* file_dose_output, int num_projections, struct voxel
   
   // Output data to standard input:
   printf("\n              Total energy absorved inside the dose deposition ROI: %.5lf keV/hist\n", 0.001*((double)total_energy_deposited)*inv_N*inv_SCALE_eV);
-  register double voxel_mass_max_dose = voxel_volume*voxel_mat_dens[max_dose_voxel_geometry].y; 
-  printf(  "              Maximum voxel dose (+-2 sigma): %lf +- %lf eV/g per history (E_dep_voxel=%lf eV/hist)\n", max_voxel_dose, max_voxel_dose_std_dev, (max_voxel_dose*voxel_mass_max_dose));
-  printf(  "              for the voxel: material=%d, density=%.8f g/cm^3, voxel_mass=%.8lf g, voxel coord in geometry=(%d,%d,%d)\n\n", (int)voxel_mat_dens[max_dose_voxel_geometry].x, voxel_mat_dens[max_dose_voxel_geometry].y, voxel_mass_max_dose, max_voxel_dose_x, max_voxel_dose_y, max_voxel_dose_z);
+  printf(  "              Maximum voxel dose (+-2 sigma): %lf +- %lf eV/g per history.\n", max_voxel_dose_all_mat, max_voxel_dose_std_dev_all_mat);  
+  
+      // OLD:   register double voxel_mass_max_dose = voxel_volume*voxel_mat_dens[max_dose_voxel_geometry].y; 
+      // OLD:   printf(  "              Maximum voxel dose (+-2 sigma): %lf +- %lf eV/g per history (E_dep_voxel=%lf eV/hist)\n", max_voxel_dose, max_voxel_dose_std_dev, (max_voxel_dose*voxel_mass_max_dose));
+      // OLD:   printf(  "              for the voxel: material=%d, density=%.8f g/cm^3, voxel_mass=%.8lf g, voxel coord in geometry=(%d,%d,%d)\n\n", (int)voxel_mat_dens[max_dose_voxel_geometry].x, voxel_mat_dens[max_dose_voxel_geometry].y, voxel_mass_max_dose, max_voxel_dose_x, max_voxel_dose_y, max_voxel_dose_z);
   
   
   // -- Report dose deposited in each material:  
   printf("              Dose deposited in the different materials inside the input ROI computed post-processing the 3D voxel dose results:\n\n");
-  printf("    [MATERIAL]  [DOSE_ROI, eV/g/hist]  [2*std_dev]  [Rel error 2*std_dev, %%]  [E_dep [eV/hist]  [MASS_ROI, g]  [NUM_VOXELS_ROI]\n");
-  printf("   =============================================================================================================================\n");
+  
+//  OLD reporting without peak dose (v1.3):    printf("    [MATERIAL]  [DOSE_ROI, eV/g/hist]  [2*std_dev]  [Rel error 2*std_dev, %%]  [E_dep [eV/hist]  [MASS_ROI, g]  [NUM_VOXELS_ROI]\n");
+  printf("  [MAT]  [DOSE_ROI eV/g/hist]  [2*std_dev]  [Rel error %%]  [Peak voxel dose]  [2*std_dev]  [Rel error %%]  [Peak voxel coord]  [E_dep eV/hist]  [MASS_ROI g]  [NUM_VOXELS_ROI]\n");
+  printf(" ===============================================================================================================================================================================\n");  
   
   for(i=0; i<MAX_MATERIALS; i++)
   {
@@ -3094,11 +3134,15 @@ int report_voxels_dose(char* file_dose_output, int num_projections, struct voxel
       double material_dose = Edep / mat_mass_ROI[i];
       material_std_dev = material_std_dev / mat_mass_ROI[i];
       
-      double rel_diff = 0.0;
+      double rel_diff=0.0, rel_diff_peak=0.0;
       if (material_dose>0.0)
+      {
         rel_diff = material_std_dev/material_dose;
+        rel_diff_peak = max_voxel_dose_std_dev[i]/max_voxel_dose[i];
+      }
     
-      printf("\t%d\t%.5lf\t\t%.5lf\t\t%.2lf\t\t%.2lf\t\t%.5lf\t%u\n", (i+1), material_dose, 2.0*material_std_dev, (2.0*100.0*rel_diff), Edep, mat_mass_ROI[i], mat_voxels[i]);            
+      printf("\t%d\t%.5lf\t%.5lf\t%.3lf\t\t%.5lf\t%.5lf\t%.3lf\t(%d,%d,%d)\t\t%.5lf\t%.5lf\t%u\n", (i+1), material_dose, 2.0*material_std_dev, (200.0*rel_diff), max_voxel_dose[i], 2.0*max_voxel_dose_std_dev[i], (200.0*rel_diff_peak), max_voxel_dose_x[i], max_voxel_dose_y[i], max_voxel_dose_z[i], Edep, mat_mass_ROI[i], mat_voxels[i]);
+      //  OLD reporting without peak dose (v1.3):   printf("\t%d\t%.5lf\t\t%.5lf\t\t%.2lf\t\t%.2lf\t\t%.5lf\t%u\n", (i+1), material_dose, 2.0*material_std_dev, (2.0*100.0*rel_diff), Edep, mat_mass_ROI[i], mat_voxels[i]);            
  
     }    
   }       
@@ -3131,8 +3175,8 @@ int report_materials_dose(int num_projections, unsigned long long int total_hist
   printf("\n\n          *** MATERIALS TOTAL DOSE TALLY REPORT ***\n\n");  
   printf("              Dose deposited in each material defined in the input file (tallied directly per material, not per voxel):\n");
   printf("              The results of this tally should be equal to the voxel tally doses for an ROI covering all voxels.\n\n");
-  printf("    [MAT]  [DOSE, eV/g/hist]  [2*std_dev]  [Rel_error 2*std_dev, %%]  [E_dep [eV/hist]  [MASS_TOTAL, g]\n");
-  printf("   ====================================================================================================\n");
+  printf("  [MAT]  [DOSE eV/g/hist]  [2*std_dev]  [Rel_error 2*std_dev, %%]  [E_dep eV/hist]  [MASS_TOTAL g]\n");
+  printf(" =================================================================================================\n");
   
   double dose, Edep, std_dev, rel_diff, inv_N = 1.0 / (double)(total_histories*((unsigned long long int)num_projections));
   int i, flag=0, max_mat=0;
