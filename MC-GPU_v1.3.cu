@@ -465,7 +465,7 @@ int main(int argc, char **argv)
                                               //  (3) inverse Rayleigh mean free path (divided by density, cm^2/g)
   short int dose_ROI_x_min, dose_ROI_x_max, dose_ROI_y_min, dose_ROI_y_max, dose_ROI_z_min, dose_ROI_z_max;  // Coordinates of the dose region of interest (ROI)
   ulonglong2 *voxels_Edep = NULL;           // Poiter where the voxel energy deposition array will be allocated
-  int voxels_Edep_bytes = 0;                      // Size of the voxel Edep array
+  unsigned int voxels_Edep_bytes = 0;                      // Size of the voxel Edep array
   
   ulonglong2 materials_dose[MAX_MATERIALS];    // Array for tally_materials_dose.     !!tally_materials_dose!!
   int kk;
@@ -1243,7 +1243,7 @@ int main(int argc, char **argv)
 //!       @param[out] file_name_materials
 //!       @param[out] file_name_output
 ////////////////////////////////////////////////////////////////////////////////
-void read_input(int argc, char** argv, int myID, unsigned long long int* total_histories, int* seed_input, int* gpu_id, int* num_threads_per_block, int* histories_per_thread, struct detector_struct* detector_data, unsigned long long int** image_ptr, int* image_bytes, struct source_struct* source_data, struct source_energy_struct* source_energy_data, char* file_name_voxels, char file_name_materials[MAX_MATERIALS][250] , char* file_name_output, char* file_name_espc, int* num_projections, double* D_angle, double* angularROI_0, double* angularROI_1, double* initial_angle, ulonglong2** voxels_Edep_ptr, int* voxels_Edep_bytes, char* file_dose_output, short int* dose_ROI_x_min, short int* dose_ROI_x_max, short int* dose_ROI_y_min, short int* dose_ROI_y_max, short int* dose_ROI_z_min, short int* dose_ROI_z_max, double* SRotAxisD, double* vertical_translation_per_projection, int* flag_material_dose)
+void read_input(int argc, char** argv, int myID, unsigned long long int* total_histories, int* seed_input, int* gpu_id, int* num_threads_per_block, int* histories_per_thread, struct detector_struct* detector_data, unsigned long long int** image_ptr, int* image_bytes, struct source_struct* source_data, struct source_energy_struct* source_energy_data, char* file_name_voxels, char file_name_materials[MAX_MATERIALS][250] , char* file_name_output, char* file_name_espc, int* num_projections, double* D_angle, double* angularROI_0, double* angularROI_1, double* initial_angle, ulonglong2** voxels_Edep_ptr, unsigned int* voxels_Edep_bytes, char* file_dose_output, short int* dose_ROI_x_min, short int* dose_ROI_x_max, short int* dose_ROI_y_min, short int* dose_ROI_y_max, short int* dose_ROI_z_min, short int* dose_ROI_z_max, double* SRotAxisD, double* vertical_translation_per_projection, int* flag_material_dose)
 {
   FILE* file_ptr = NULL;
   char new_line[250];
@@ -2395,7 +2395,7 @@ void init_CUDA_device( int* gpu_id, int myID, int numprocs,
         struct rayleigh_struct* rayleigh_table, struct rayleigh_struct** rayleigh_table_device,
         struct compton_struct* compton_table, struct compton_struct** compton_table_device, 
         struct detector_struct** detector_data_device, struct source_struct** source_data_device,
-        ulonglong2* voxels_Edep, ulonglong2** voxels_Edep_device, int voxels_Edep_bytes, short int* dose_ROI_x_min, short int* dose_ROI_x_max, short int* dose_ROI_y_min, short int* dose_ROI_y_max, short int* dose_ROI_z_min, short int* dose_ROI_z_max,
+        ulonglong2* voxels_Edep, ulonglong2** voxels_Edep_device, unsigned int voxels_Edep_bytes, short int* dose_ROI_x_min, short int* dose_ROI_x_max, short int* dose_ROI_y_min, short int* dose_ROI_y_max, short int* dose_ROI_z_min, short int* dose_ROI_z_max,
         ulonglong2* materials_dose, ulonglong2** materials_dose_device, int flag_material_dose, int num_projections)
 {    
   cudaDeviceProp deviceProp;
