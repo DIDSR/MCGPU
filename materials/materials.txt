@@ -1,2 +1,0 @@
-This folder will contain material files for MCGPU. 
-You can use the Issue tab to request new materials if you can't generate them.
